@@ -10,7 +10,7 @@ use std::path::PathBuf;
 #[command(
     version,
     about,
-    long_about = "A CLI tool to compile and decompile .ido files for game UI resources. Supports EUC-KR encoding and zlib compression. Useful for modifying game UI assets."
+    long_about = "A CLI tool to compile and decompile .ido files. Supports EUC-KR encoding and zlib compression."
 )]
 #[command(group(
     ArgGroup::new("action")
