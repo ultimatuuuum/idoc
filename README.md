@@ -7,7 +7,9 @@ You need to compile it yourself in able to use this tool.
 
 ### Compiling
 ```
-cargo build --release
+> cargo build --release
+> # OR Install globally
+> cargo install --path .
 ```
 
 ### Help
