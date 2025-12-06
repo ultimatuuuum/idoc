@@ -1,5 +1,14 @@
-# IDO Tool
+# IDOC
 A simple CLI tool to decompile .ido files, and compile raw file back to .ido file.
+
+## Requirements
+You need to compile it yourself in able to use this tool.
+- [Rust](https://rust-lang.org/)
+
+### Compiling
+```
+cargo build --release
+```
 
 ### Help
 ```
