@@ -108,7 +108,13 @@ fn decompile(path: &PathBuf, output: &PathBuf) -> Result<(), io::Error> {
         let mut output_file = File::create(&output_path)?;
         output_file.write_all(&decompressed_data)?;
 
+        // Save header to .meta file
+        let meta_path = output_path.with_extension("meta");
+        let mut meta_file = File::create(&meta_path)?;
+        meta_file.write_all(header_hex.as_bytes())?;
+
         println!("Saved as {}", output_path.display());
+        println!("Saved header to {}", meta_path.display());
         return Ok(());
     }
 
@@ -129,46 +135,91 @@ fn decompile(path: &PathBuf, output: &PathBuf) -> Result<(), io::Error> {
 }
 
 fn compile(input: &PathBuf, output: &PathBuf) -> Result<(), io::Error> {
-    let header_marker = "<!-- IDO HEADER: ";
-    let end_header_marker = " -->";
+    // 1. Check for .meta file
+    let meta_path = input.with_extension("meta");
+    let meta_header = if meta_path.exists() {
+        println!("Found .meta file: {}", meta_path.display());
+        let mut content = String::new();
+        File::open(&meta_path)?.read_to_string(&mut content)?;
+        Some(hex::decode(content.trim()).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to decode hex in .meta: {}", e),
+            )
+        })?)
+    } else {
+        None
+    };
 
-    println!("Reading and encoding XML from {}...", input.display());
-    let mut xml_content = String::new();
-    let mut input_file = File::open(input)?;
-    input_file.read_to_string(&mut xml_content)?;
+    // 2. Determine input type (XML vs Binary)
+    let is_xml = input
+        .extension()
+        .map_or(false, |s| s.eq_ignore_ascii_case("xml"));
 
-    let start_idx = xml_content.rfind(header_marker).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "Header marker not found in XML")
-    })?;
-    let after_marker = &xml_content[start_idx + header_marker.len()..];
-    let end_idx = after_marker.find(end_header_marker).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "End header marker not found in XML",
-        )
-    })?;
-    let hex_str = &after_marker[..end_idx];
-    let header = hex::decode(hex_str).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("Failed to decode header: {}", e),
-        )
-    })?;
+    let (header, raw_bytes) = if is_xml {
+        println!("Reading and encoding XML from {}...", input.display());
+        let mut xml_content = String::new();
+        File::open(input)?.read_to_string(&mut xml_content)?;
 
-    println!("Header recovered: {} bytes", header.len());
+        let header_marker = "<!-- IDO HEADER: ";
+        let end_header_marker = " -->";
 
-    // 1. Encode UTF-8 back to EUC-KR
-    // If we don't do this, Korean characters will break in-game.
-    let clean_xml_content = &xml_content[..start_idx].trim();
-    let (cow, _, unmappable) = EUC_KR.encode(clean_xml_content);
+        // Try to find embedded header
+        let (embedded_header, content_str) =
+            if let Some(start_idx) = xml_content.rfind(header_marker) {
+                let after = &xml_content[start_idx + header_marker.len()..];
+                if let Some(end_idx) = after.find(end_header_marker) {
+                    let hex_str = &after[..end_idx];
+                    let h = hex::decode(hex_str).map_err(|e| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Failed to decode embedded header: {}", e),
+                        )
+                    })?;
+                    (Some(h), &xml_content[..start_idx])
+                } else {
+                    (None, xml_content.as_str())
+                }
+            } else {
+                (None, xml_content.as_str())
+            };
 
-    if unmappable {
-        eprintln!("Warning: Some characters could not be mapped to EUC-KR.");
-    }
+        // Use meta header if available, otherwise embedded
+        let final_header = meta_header.or(embedded_header).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "Header not found in .meta or embedded in XML",
+            )
+        })?;
 
-    let raw_bytes = cow.to_vec();
+        let clean_content = content_str.trim();
+        let (cow, _, unmappable) = EUC_KR.encode(clean_content);
 
-    print!("Compressing {} bytes of EUC-KR data...", raw_bytes.len());
+        if unmappable {
+            eprintln!("Warning: Some characters could not be mapped to EUC-KR.");
+        }
+
+        (final_header, cow.to_vec())
+    } else {
+        // Binary Mode
+        let header = meta_header.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "Compiling binary file requires a .meta file at {}",
+                    meta_path.display()
+                ),
+            )
+        })?;
+
+        println!("Reading binary data from {}...", input.display());
+        let mut data = Vec::new();
+        File::open(input)?.read_to_end(&mut data)?;
+        (header, data)
+    };
+
+    println!("Header size: {} bytes", header.len());
+    println!("Compressing {} bytes of data...", raw_bytes.len());
 
     let mut encoder = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
     encoder.write_all(&raw_bytes)?;
@@ -183,8 +234,8 @@ fn compile(input: &PathBuf, output: &PathBuf) -> Result<(), io::Error> {
     output_file.write_all(&compressed_data)?;
 
     println!(
-        "Successfully compiled IDO file with compressed data ({} bytes) to {}.",
-        compressed_data.len(),
+        "Successfully compiled IDO file ({} bytes) to {}.",
+        header.len() + compressed_data.len(),
         output.display()
     );
 
