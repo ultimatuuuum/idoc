@@ -56,9 +56,20 @@ fn decompile(path: &PathBuf, output: &PathBuf) -> Result<(), io::Error> {
     let mut header = [0u8; 0x5F];
     file.read_exact(&mut header)?;
 
+    if header.len() >= 8 && header[0] == 0x14 && &header[4..7] == b"_gb" {
+        println!("Detected Type: Gamebryo State Block (Binary)");
+
+        let output_path = output.with_extension("gb");
+        let mut input_file = File::open(path)?;
+        let mut output_file = File::create(&output_path)?;
+
+        std::io::copy(&mut input_file, &mut output_file)?;
+        println!("Saved raw binary to {}", output_path.display());
+        return Ok(());
+    }
+
     if header.starts_with(&[0x01, 0x00, 0x01, 0x00]) {
         println!("Detected Type: Shop Database (Binary Structs)");
-        // We change the output extension to .csv automatically if user didn't specify
 
         return parse_shop_db(&path, &output);
     }
