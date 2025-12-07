@@ -1,9 +1,11 @@
+use byteorder::{LittleEndian, ReadBytesExt};
 use clap::{ArgGroup, Parser};
 use encoding_rs::EUC_KR;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
+use serde::Serialize;
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser, Clone)]
@@ -54,12 +56,50 @@ fn decompile(path: &PathBuf, output: &PathBuf) -> Result<(), io::Error> {
     let mut header = [0u8; 0x5F];
     file.read_exact(&mut header)?;
 
+    if header.starts_with(&[0x01, 0x00, 0x01, 0x00]) {
+        println!("Detected Type: Shop Database (Binary Structs)");
+        // We change the output extension to .csv automatically if user didn't specify
+
+        return parse_shop_db(&path, &output);
+    }
+
     let header_hex = hex::encode(header);
 
     // Decompress
     let mut decoder = ZlibDecoder::new(file);
     let mut decompressed_data = Vec::new();
     decoder.read_to_end(&mut decompressed_data)?;
+
+    let extension = if decompressed_data.starts_with(b"DDS ") {
+        println!("Detected Type: DDS Texture");
+        Some("dds")
+    } else if decompressed_data.ends_with(b"TRUEVISION-XFILE.\0") {
+        println!("Detected Type: TGA Texture");
+        Some("tga")
+    } else if decompressed_data.starts_with(b"BM") {
+        println!("Detected Type: BMP Texture");
+        Some("bmp")
+    } else if decompressed_data.starts_with(b"\x89PNG") {
+        println!("Detected Type: PNG Texture");
+        Some("png")
+    } else {
+        None
+    };
+
+    if let Some(extension) = extension {
+        let output_path = if output.extension().is_none() {
+            let output_w_ext = output.with_extension(extension);
+            output_w_ext
+        } else {
+            output.clone()
+        };
+
+        let mut output_file = File::create(&output_path)?;
+        output_file.write_all(&decompressed_data)?;
+
+        println!("Saved as {}", output_path.display());
+        return Ok(());
+    }
 
     // Decode EUC-KR to UTF-8
     let (cow, _encoding_used, had_errors) = EUC_KR.decode(&decompressed_data);
@@ -138,4 +178,100 @@ fn compile(input: &PathBuf, output: &PathBuf) -> Result<(), io::Error> {
     );
 
     Ok(())
+}
+
+fn parse_shop_db(input: &PathBuf, output: &PathBuf) -> io::Result<()> {
+    println!(
+        "Parsing Shop Database: {} -> {}",
+        input.display(),
+        output.display()
+    );
+
+    let mut file = File::open(input)?;
+    let file_len = file.metadata()?.len();
+    let record_size = 456; // 0x1C8 from Node.js script
+
+    if file_len % record_size != 0 {
+        println!(
+            "Warning: File size is not a multiple of record size ({})!",
+            record_size
+        );
+    }
+
+    let item_count = file_len / record_size;
+    println!("Found {} items.", item_count);
+
+    let mut items = Vec::new();
+
+    for i in 0..item_count {
+        let offset = i * record_size;
+        file.seek(SeekFrom::Start(offset))?;
+
+        // Read Fields (Offsets from Node.js script)
+        // 0x00: Category
+        let category = file.read_u16::<LittleEndian>()?;
+        // 0x02: Type ID
+        let item_type_id = file.read_u16::<LittleEndian>()?;
+        // 0x04: Variant ID
+        let variant_id = file.read_i16::<LittleEndian>()?;
+        // 0x06: Validity
+        let validity = file.read_i16::<LittleEndian>()?;
+
+        // Skip to 0x0C: Type Flag
+        file.seek(SeekFrom::Start(offset + 0x0C))?;
+        let type_flag = file.read_u8()?;
+
+        // Skip to 0x38: Set Item ID
+        file.seek(SeekFrom::Start(offset + 0x38))?;
+        let set_item_id = file.read_i32::<LittleEndian>()?;
+
+        // Skip to 0x64: Name (100 bytes / 50 wchars)
+        file.seek(SeekFrom::Start(offset + 0x64))?;
+        let mut name_buffer = [0u8; 100];
+        file.read_exact(&mut name_buffer)?;
+
+        // Parse UTF-16LE String
+        let name = parse_utf16_string(&name_buffer);
+
+        items.push(ShopItem {
+            category,
+            item_type_id,
+            variant_id,
+            validity,
+            type_flag,
+            set_item_id,
+            name,
+        });
+    }
+
+    // Write to CSV
+    let mut wtr = csv::Writer::from_path(output)?;
+    for item in items {
+        wtr.serialize(item)?;
+    }
+    wtr.flush()?;
+
+    println!("Success! Dumped to {}", output.display());
+    Ok(())
+}
+
+fn parse_utf16_string(buffer: &[u8]) -> String {
+    let u16_vec: Vec<u16> = buffer
+        .chunks_exact(2)
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .take_while(|&c| c != 0) // Stop at null terminator
+        .collect();
+
+    String::from_utf16_lossy(&u16_vec).trim().to_string()
+}
+
+#[derive(Debug, Serialize)]
+struct ShopItem {
+    category: u16,
+    item_type_id: u16,
+    variant_id: i16,
+    validity: i16,
+    type_flag: u8,
+    set_item_id: i32,
+    name: String,
 }
